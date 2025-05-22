@@ -1,0 +1,40 @@
+#!/usr/bin/env python3
+import argparse, logging, time
+import common
+from common import conn_from_rc
+
+logging.basicConfig(level=logging.INFO,format="%(asctime)s %(message)s")
+
+def main(rc,tag,key):
+    conn=conn_from_rc(rc)
+    for s in conn.compute.servers(details=False):
+        if tag in s.tags:
+            conn.compute.delete_server(s.id)
+    while any(tag in s.tags for s in conn.compute.servers(details=False)):
+        time.sleep(5)
+    for ip in conn.network.ips():
+        if tag in ip.tags:
+            conn.network.delete_ip(ip.id)
+    for sg in conn.network.security_groups():
+        if tag in sg.tags:
+            conn.network.delete_security_group(sg.id)
+    rt=conn.network.find_router(f"{tag}_rt")
+    if rt:
+        for iface in conn.network.router_interfaces(rt):
+            conn.network.remove_interface_from_router(rt,subnet_id=iface['subnet_id'])
+        conn.network.delete_router(rt.id)
+    sub=conn.network.find_subnet(f"{tag}_subnet")
+    if sub:
+        conn.network.delete_subnet(sub.id)
+    net=conn.network.find_network(f"{tag}_net")
+    if net:
+        conn.network.delete_network(net.id)
+    kp=conn.compute.find_keypair(f"{tag}_key")
+    if kp: conn.compute.delete_keypair(kp.id)
+    logging.info("Cleanup done.")
+
+if __name__=='__main__':
+    p=argparse.ArgumentParser()
+    p.add_argument("openrc"); p.add_argument("tag"); p.add_argument("ssh_key")
+    args=p.parse_args()
+    main(args.openrc,args.tag,args.ssh_key)
