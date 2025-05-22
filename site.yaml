@@ -1,0 +1,107 @@
+---
+- name: Configure bastion
+  hosts: bastion
+  gather_facts: false
+  tasks:
+    - name: Copy alive.py
+      copy:
+        src: alive.py
+        dest: /usr/local/bin/alive.py
+        mode: '0755'
+    - name: Install requirements
+      pip:
+        name:
+          - flask
+          - ping3
+    - name: Deploy systemd service
+      copy:
+        dest: /etc/systemd/system/alive.service
+        content: |
+          [Unit]
+          Description=Bastion monitor
+          [Service]
+          ExecStart=/usr/bin/python3 /usr/local/bin/alive.py
+          Restart=always
+          [Install]
+          WantedBy=multi-user.target
+      notify: Restart alive
+  handlers:
+    - name: Restart alive
+      systemd:
+        name: alive
+        state: restarted
+        enabled: yes
+        daemon_reload: yes
+
+- name: Configure proxy
+  hosts: proxy
+  gather_facts: false
+  tasks:
+    - name: Install haproxy
+      apt:
+        name: haproxy
+        update_cache: yes
+    - name: Deploy cfg
+      template:
+        src: haproxy.cfg.j2
+        dest: /etc/haproxy/haproxy.cfg
+      notify: Restart haproxy
+    - name: Ensure running
+      systemd:
+        name: haproxy
+        state: started
+        enabled: yes
+  handlers:
+    - name: Restart haproxy
+      systemd:
+        name: haproxy
+        state: restarted
+        daemon_reload: yes
+
+- name: Configure service nodes
+  hosts: nodes
+  become: yes
+  gather_facts: false
+  tasks:
+    - apt:
+        name:
+          - python3-pip
+          - snmpd
+        update_cache: yes
+    - pip:
+        name: flask
+    - copy:
+        src: service.py
+        dest: /opt/service.py
+        mode: '0755'
+    - copy:
+        src: snmpd.conf
+        dest: /etc/snmp/snmpd.conf
+    - copy:
+        dest: /etc/systemd/system/service.service
+        content: |
+          [Unit]
+          Description=service.py
+          After=network.target
+          [Service]
+          ExecStart=/usr/bin/python3 /opt/service.py
+          Restart=always
+          [Install]
+          WantedBy=multi-user.target
+      notify:
+        - Restart service
+    - name: Enable services
+      systemd:
+        name: "{{ item }}"
+        state: started
+        enabled: yes
+        daemon_reload: yes
+      loop:
+        - service
+        - snmpd
+  handlers:
+    - name: Restart service
+      systemd:
+        name: service
+        state: restarted
+        daemon_reload: yes
