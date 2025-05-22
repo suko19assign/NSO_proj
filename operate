@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import argparse, logging, os, signal, time, sys
+import argparse, logging, os, signal, time
 import common
 from common import conn_from_rc, pick_image, wait_active
 
@@ -13,13 +13,12 @@ def desired():
     except:
         return 3
 
-def main(rc,tag,key):
+def main(rc, tag, key):
     conn=conn_from_rc(rc)
     img=pick_image(conn)
     fl_node=conn.compute.find_flavor('m1.tiny')
     net_id=conn.network.find_network(f"{tag}_net").id
     sg_nodes=conn.network.find_security_group(f"{tag}_sg_nodes")
-    kname=f"{tag}_key"
     while not stop:
         want=desired()
         nodes=[s for s in conn.compute.servers(details=False) if s.name.startswith(f"{tag}_") and s.name[len(tag)+1:].isdigit()]
@@ -28,8 +27,8 @@ def main(rc,tag,key):
         if diff>0:
             for n in range(len(nodes)+1,len(nodes)+diff+1):
                 srv=conn.compute.create_server(name=f"{tag}_{n}",image_id=img.id,flavor_id=fl_node.id,
-                                               networks=[{'uuid':net_id}],key_name=kname,
-                                               security_groups=[{'name':sg_nodes.name}],tags=[tag])
+                        networks=[{'uuid':net_id}],key_name=f"{tag}_key",
+                        security_groups=[{'name':sg_nodes.name}])
                 wait_active(conn,srv)
             os.system(f"OPENRC={rc} TAG={tag} ansible-playbook -i inventory.py site.yaml")
         elif diff<0:
