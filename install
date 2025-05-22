@@ -3,84 +3,87 @@ import argparse, logging, os, time
 import common
 from common import conn_from_rc, pick_image, wait_active
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
-log = logging.getLogger("install")
+logging.basicConfig(level=logging.INFO,format="%(asctime)s %(message)s")
+log=logging.getLogger("install")
 
-def sg(conn,name,tag,rules):
-    s = conn.network.find_security_group(name)
-    if s: return s
-    s = conn.network.create_security_group(name=name,tags=[tag])
+def sg(conn,name,rules):
+    sg=conn.network.find_security_group(name)
+    if sg: return sg
+    sg=conn.network.create_security_group(name=name)
     for r in rules:
-        conn.network.create_security_group_rule(security_group_id=s.id,**r)
-    return s
+        conn.network.create_security_group_rule(security_group_id=sg.id,**r)
+    return sg
 
-def fip(conn,server,tag):
+def attach_fip(conn, server):
+    # reuse unassociated fip if any
     for ip in conn.network.ips():
         if not ip.port_id:
-            chosen = ip
-            break
+            chosen=ip; break
     else:
-        chosen = conn.network.create_ip(floating_network_id=conn.network.find_network('public').id,tags=[tag])
+        chosen=conn.network.create_ip(floating_network_id=conn.network.find_network('public').id)
     conn.compute.add_floating_ip_to_server(server, chosen.floating_ip_address)
     return chosen.floating_ip_address
 
-def main(rc, tag, key_path):
-    conn = conn_from_rc(rc)
-    kname = f"{tag}_key"
+def main(rc, tag, keyfile):
+    conn=conn_from_rc(rc)
+    kname=f"{tag}_key"
     if not conn.compute.find_keypair(kname):
-        conn.compute.create_keypair(name=kname, public_key=open(key_path).read())
-    net = conn.network.find_network(f"{tag}_net")
+        conn.compute.create_keypair(name=kname, public_key=open(keyfile).read())
+
+    net=conn.network.find_network(f"{tag}_net")
     if not net:
-        net = conn.network.create_network(name=f"{tag}_net", tags=[tag])
-        subnet = conn.network.create_subnet(name=f"{tag}_subnet", network_id=net.id,
-                                            ip_version=4, cidr="10.0.0.0/24",
-                                            gateway_ip="10.0.0.1", dns_nameservers=["8.8.8.8"], tags=[tag])
-        router = conn.network.create_router(name=f"{tag}_rt",
-                                            external_gateway_info={'network_id': conn.network.find_network('public').id},
-                                            tags=[tag])
+        net=conn.network.create_network(name=f"{tag}_net")
+        subnet=conn.network.create_subnet(name=f"{tag}_subnet", network_id=net.id,
+                    ip_version=4,cidr="10.0.0.0/24", gateway_ip="10.0.0.1",
+                    dns_nameservers=["8.8.8.8"])
+        router=conn.network.create_router(name=f"{tag}_rt",
+                    external_gateway_info={'network_id':conn.network.find_network('public').id})
         conn.network.add_interface_to_router(router, subnet_id=subnet.id)
-    net_id = conn.network.find_network(f"{tag}_net").id
-    sg_nodes = sg(conn,f"{tag}_sg_nodes",tag,[
+    net_id=conn.network.find_network(f"{tag}_net").id
+
+    sg_nodes=sg(conn,f"{tag}_sg_nodes",[
         dict(direction='ingress',protocol='tcp',port_range_min=5000,port_range_max=5000,remote_ip_prefix='0.0.0.0/0'),
         dict(direction='ingress',protocol='udp',port_range_min=6000,port_range_max=6000,remote_ip_prefix='0.0.0.0/0'),
         dict(direction='ingress',protocol=None,remote_ip_prefix='10.0.0.0/24')
     ])
-    sg_proxy = sg(conn,f"{tag}_sg_proxy",tag,[
+    sg_proxy=sg(conn,f"{tag}_sg_proxy",[
         dict(direction='ingress',protocol='tcp',port_range_min=5000,port_range_max=5000,remote_ip_prefix='0.0.0.0/0'),
-        dict(direction='ingress',protocol='udp',port_range_min=6000,port_range_max=6000,remote_ip_prefix='0.0.0.0/0'),
+        dict(direction='ingress',protocol='udp',port_range_min=6000,port_range_max=6000,remote_ip_prefix='0.0.0.0/0')
     ])
-    sg_bast = sg(conn,f"{tag}_sg_bastion",tag,[
+    sg_bast=sg(conn,f"{tag}_sg_bastion",[
         dict(direction='ingress',protocol='tcp',port_range_min=22,port_range_max=22,remote_ip_prefix='0.0.0.0/0')
     ])
-    img = pick_image(conn)
+
+    img=pick_image(conn)
     fl_node  = conn.compute.find_flavor('m1.tiny')
     fl_proxy = conn.compute.find_flavor('m1.small')
     fl_bast  = conn.compute.find_flavor('m1.micro')
 
     def launch(name, flavor, sg):
-        srv=conn.compute.find_server(name)
+        srv = conn.compute.find_server(name)
         if srv: return wait_active(conn,srv)
-        srv=conn.compute.create_server(name=name,image_id=img.id,flavor_id=flavor.id,
-                                       networks=[{'uuid':net_id}],key_name=kname,
-                                       security_groups=[{'name':sg.name}],tags=[tag])
+        srv = conn.compute.create_server(name=name,image_id=img.id,flavor_id=flavor.id,
+                    networks=[{'uuid':net_id}], key_name=kname,
+                    security_groups=[{'name':sg.name}])
         return wait_active(conn,srv)
 
     bastion=launch(f"{tag}_bastion",fl_bast,sg_bast)
-    proxy  = launch(f"{tag}_proxy", fl_proxy, sg_proxy)
-    bast_ip=fip(conn,bastion,tag)
-    proxy_ip=fip(conn,proxy,tag)
+    proxy  = launch(f"{tag}_proxy",fl_proxy,sg_proxy)
+    bast_ip=attach_fip(conn,bastion)
+    prox_ip=attach_fip(conn,proxy)
     for i in range(1,4):
         launch(f"{tag}_{i}",fl_node,sg_nodes)
-    # ssh config
-    with open(f"{tag}_SSHconfig",'w') as cfg:
-        cfg.write(f"Host bastion\n  HostName {bast_ip}\n  User ubuntu\n  IdentityFile {key_path}\n\n")
-        cfg.write(f"Host {tag}_*\n  User ubuntu\n  IdentityFile {key_path}\n  ProxyJump bastion\n")
+
+    with open(f"{tag}_SSHconfig","w") as f:
+        f.write(f"Host bastion\n  HostName {bast_ip}\n  User ubuntu\n  IdentityFile {keyfile}\n\n")
+        f.write(f"Host {tag}_*\n  User ubuntu\n  IdentityFile {keyfile}\n  ProxyJump bastion\n")
+
     time.sleep(25)
     env=f"OPENRC={rc} TAG={tag}"
     os.system(f"{env} ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i inventory.py site.yaml")
 
-if __name__=='__main__':
-    ap=argparse.ArgumentParser()
-    ap.add_argument("openrc"); ap.add_argument("tag"); ap.add_argument("ssh_key")
-    a=ap.parse_args()
+if __name__=="__main__":
+    p=argparse.ArgumentParser()
+    p.add_argument("openrc"); p.add_argument("tag"); p.add_argument("ssh_key")
+    a=p.parse_args()
     main(a.openrc,a.tag,a.ssh_key)
