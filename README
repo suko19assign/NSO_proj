@@ -1,18 +1,24 @@
-#Simple flask services/applications for various assignments.
-# 
-# main.py: Online calculator, supports only 'add'.
-# application2.py: Replies with a string containing the Time and hostname.
-# assignment2.py: Replies with an HTML formatted string containing the Time and hostname.
+Instructions to run
 
-#export FLASK_APP=<filename>
-#export FLASK_RUN_HOST=<localhost|0.0.0.0>
-#export FLASK_RUN_PORT=8210
+A)install 
+1. chmod +x install
+2. ./install <openrc> <tag> <ssh_key>
 
+B)operate 
+1. chmod +x operate
+2. ./operate <openrc> <tag> <ssh_key>
+3. In the operate mode (while it is running ) a quick check can be made by changing number of nodes in servers.conf file
 
+C)cleanup 
+1. chmod +x cleanup
+2. ./cleanup <openrc> <tag> <ssh_key>
 
-Usage Example:
-export FLASK_APP=main.py
-export FLASK_RUN_HOST=localhost
-export FLASK_RUN_PORT=8210
-flask run
+The file common.py contains all the helpers functions to run install and operate (basically things like the inital
+connection o openstack so on and so forth) so donot delete it. you dont need to give any permisions to 
+common.py. 
 
+the apache benchmark can be run by 
+ab -n <TOTAL_REQUESTS> -c <CONCURRENCY> http://<proxy_public_ip>:5000/
+
+but make sure the apache utils are installed if not it can be installed using  this
+sudo apt install apache2-utils 
