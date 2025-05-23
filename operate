@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""
+operate – reconciliation loop for service nodes named <tag>_<N>
+"""
+import argparse, logging, os, re, signal, stat, time
+from common import (
+    conn_from_rc, pick_image, choose_flavor, wait_active, wait_ssh
+)
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+LOG = logging.getLogger("operate")
+NUMERIC = re.compile(r"_(\d+)$")
+stop = False
+signal.signal(signal.SIGINT, lambda *_: globals().update(stop=True))
+
+
+def desired() -> int:
+    try:
+        return int(open("servers.conf").read().strip())
+    except Exception:
+        return 3
+
+
+def index(name, tag):
+    m = NUMERIC.search(name) if name.startswith(f"{tag}_") else None
+    return int(m.group(1)) if m else None
+
+
+def first_fixed_ip(conn, server, timeout=300):
+    start = time.time()
+    while time.time() - start < timeout:
+        s = conn.compute.get_server(server.id)
+        for nets in (s.addresses or {}).values():
+            for a in nets:
+                if a.get("OS-EXT-IPS:type") == "fixed":
+                    return a["addr"]
+        time.sleep(5)
+    raise TimeoutError("no fixed IP")
+
+
+def bast_fip(server):
+    for nets in server.addresses.values():
+        for a in nets:
+            if a.get("OS-EXT-IPS:type") == "floating":
+                return a["addr"]
+
+
+def build_cfg(path, priv, bast_ip, pairs):
+    with open(path, "w") as f:
+        f.write(
+            f"Host bastion\nHostName {bast_ip}\nUser ubuntu\n"
+            f"IdentityFile {priv}\nStrictHostKeyChecking no\n"
+            f"UserKnownHostsFile /dev/null\n\n"
+        )
+        for alias, ip in pairs:
+            for h in (alias, ip):
+                f.write(
+                    f"Host {h}\nHostName {ip}\nUser ubuntu\n"
+                    f"IdentityFile {priv}\nProxyJump bastion\n"
+                    f"StrictHostKeyChecking no\nUserKnownHostsFile /dev/null\n\n"
+                )
+
+
+def main(rc, tag, priv):
+    conn = conn_from_rc(rc)
+    image = pick_image(conn)
+    flavor = choose_flavor(conn, 1, 512)
+    net = conn.network.find_network(f"{tag}_net")
+    sg = conn.network.find_security_group(f"{tag}_sg_nodes")
+    bastion = conn.compute.find_server(f"{tag}_bastion")
+    bast_ip = bast_fip(bastion)
+    cfg = f"{tag}_SSHconfig"
+
+    while not stop:
+        wanted = desired()
+        all_srv = list(conn.compute.servers(details=False))
+        nodes = [s for s in all_srv if index(s.name, tag) is not None]
+        diff = wanted - len(nodes)
+        LOG.info("Desired %d nodes; have %d", wanted, len(nodes))
+
+        if diff > 0:
+            LOG.info("Scaling out by %d nodes", diff)
+            highest = max((index(s.name, tag) for s in nodes), default=0)
+            new_nodes = []
+            for n in range(1, diff + 1):
+                idx = highest + n
+                name = f"{tag}_{idx}"
+                LOG.info("  Launching %s", name)
+                srv = conn.compute.create_server(
+                    name=name, image_id=image.id, flavor_id=flavor.id,
+                    networks=[{"uuid": net.id}], key_name=f"{tag}_key",
+                    security_groups=[{"name": sg.name}],
+                )
+                wait_active(conn, srv)
+                new_nodes.append(srv)
+                nodes.append(srv)
+
+            pairs = [(s.name, first_fixed_ip(conn, s)) for s in nodes]
+            build_cfg(cfg, priv, bast_ip, pairs)
+            for srv in new_nodes:
+                wait_ssh(srv.name, "ubuntu", priv, ssh_config=cfg)
+
+            # ensure common.py is executable for inventory
+            if os.path.exists("common.py"):
+                m = os.stat("common.py").st_mode
+                os.chmod("common.py", m | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+            env = (
+                f"OPENRC={rc} TAG={tag} SSH_KEY={priv} "
+                f"ANSIBLE_HOST_KEY_CHECKING=False "
+                f"ANSIBLE_SSH_COMMON_ARGS='-F {cfg}' "
+            )
+            os.system(env + "ansible-playbook -i common.py site.yaml")
+
+        elif diff < 0:
+            LOG.info("Scaling in by %d nodes", -diff)
+            victims = sorted(nodes, key=lambda s: index(s.name, tag), reverse=True)[: -diff]
+            for srv in victims:
+                LOG.info("  Deleting %s", srv.name)
+                conn.compute.delete_server(srv.id)
+
+            time.sleep(10)
+
+            remain = [s for s in conn.compute.servers(details=False) if index(s.name, tag) is not None]
+            pairs = [(s.name, first_fixed_ip(conn, s)) for s in remain]
+            build_cfg(cfg, priv, bast_ip, pairs)
+
+            # ensure common.py is executable
+            if os.path.exists("common.py"):
+                m = os.stat("common.py").st_mode
+                os.chmod("common.py", m | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+            env = (
+                f"OPENRC={rc} TAG={tag} SSH_KEY={priv} "
+                f"ANSIBLE_HOST_KEY_CHECKING=False "
+                f"ANSIBLE_SSH_COMMON_ARGS='-F {cfg}' "
+            )
+            os.system(env + "ansible-playbook -i common.py site.yaml")
+
+        for _ in range(30):
+            if stop:
+                break
+            time.sleep(1)
+
+    LOG.info("Operate loop exited")
+
+
+if __name__ == "__main__":
+    p = argparse.ArgumentParser()
+    p.add_argument("openrc")
+    p.add_argument("tag")
+    p.add_argument("ssh_key")
+    a = p.parse_args()
+    main(a.openrc, a.tag, a.ssh_key)
+

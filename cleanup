@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+"""
+cleanup – remove everything that was created by the install script for a
+given <tag>.  Idempotent: you can run it multiple times.
+
+Usage:
+    cleanup <openrc> <tag> <ssh_key>
+"""
+import argparse
+import logging
+import time
+
+from common import conn_from_rc
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+LOG = logging.getLogger("cleanup")
+
+# helper functions
+def detach_router_interfaces(conn, router):
+    """Detach all subnets connected to router."""
+    for port in conn.network.ports(device_id=router.id):
+        for ip in port.fixed_ips:
+            subnet_id = ip["subnet_id"]
+            LOG.info("Detaching subnet %s from router %s", subnet_id, router.name)
+            try:
+                conn.network.remove_interface_from_router(
+                    router, subnet_id=subnet_id
+                )
+            except Exception as exc:
+                LOG.warning("  Could not detach interface: %s", exc)
+
+
+def delete_servers(conn, tag):
+    """Delete all Nova servers whose name starts with '<tag>_(just for readab)'."""
+    for srv in conn.compute.servers():
+        if srv.name.startswith(f"{tag}_"):
+            LOG.info("Deleting server %s", srv.name)
+            conn.compute.delete_server(srv.id, ignore_missing=True)
+
+
+def delete_fips(conn, tag):
+    """Delete floating IPs that belong to resources with this <tag>."""
+    for fip in conn.network.ips():
+        if tag in (fip.description or "") or fip.port_id and tag in fip.port_id:
+            LOG.info("Deleting floating IP %s", fip.floating_ip_address)
+            conn.network.delete_ip(fip, ignore_missing=True)
+
+
+def delete_network_objects(conn, tag):
+    """Remove security groups, router, subnet, network, and key-pair."""
+    # security groups
+    for sg_name in (
+        f"{tag}_sg_nodes",
+        f"{tag}_sg_bastion",
+        f"{tag}_sg_proxy",
+    ):
+        sg = conn.network.find_security_group(sg_name)
+        if sg:
+            LOG.info("Deleting security group %s", sg.name)
+            conn.network.delete_security_group(sg, ignore_missing=True)
+
+    # router
+    router = conn.network.find_router(f"{tag}_rt")
+    if router:
+        detach_router_interfaces(conn, router)
+        LOG.info("Deleting router %s", router.name)
+        conn.network.delete_router(router, ignore_missing=True)
+
+    # subnet
+    subnet = conn.network.find_subnet(f"{tag}_subnet")
+    if subnet:
+        LOG.info("Deleting subnet %s", subnet.name)
+        conn.network.delete_subnet(subnet, ignore_missing=True)
+
+    # network
+    net = conn.network.find_network(f"{tag}_net")
+    if net:
+        LOG.info("Deleting network %s", net.name)
+        conn.network.delete_network(net, ignore_missing=True)
+
+    # key-pair
+    kp = conn.compute.find_keypair(f"{tag}_key")
+    if kp:
+        LOG.info("Deleting key-pair %s", kp.name)
+        conn.compute.delete_keypair(kp, ignore_missing=True)
+        
+# main
+def main(openrc: str, tag: str, _ssh_key: str):
+    LOG.info("Cleanup started for tag %s", tag)
+    conn = conn_from_rc(openrc)
+
+    # 1. delete servers and their floating IPs
+    delete_servers(conn, tag)
+    delete_fips(conn, tag)
+
+    # give Neutron time to detach ports so network deletion succeeds
+    time.sleep(10)
+
+    # 2. delete network-level objects
+    delete_network_objects(conn, tag)
+
+    LOG.info("Cleanup completed for tag %s", tag)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("openrc")
+    parser.add_argument("tag")
+    parser.add_argument("ssh_key")  # for symmet
+    args = parser.parse_args()
+    main(args.openrc, args.tag, args.ssh_key)
