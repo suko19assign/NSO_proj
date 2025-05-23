@@ -1,30 +1,49 @@
 ---
+# BASTION – jump host + node-avail API
 - name: Configure bastion
   hosts: bastion
   gather_facts: false
+  become: yes
+
   tasks:
-    - name: Copy alive.py
-      copy:
+    - apt:
+        update_cache: yes
+        name: python3-pip
+
+    - copy:
         src: alive.py
         dest: /usr/local/bin/alive.py
-        mode: '0755'
-    - name: Install requirements
-      pip:
+        mode: "0755"
+
+    - copy:
+        dest: /usr/local/bin/nodes.yaml
+        content: |
+          {% for host in groups['nodes'] %}
+          {{ hostvars[host].ansible_host }}
+          {% endfor %}
+      notify: Restart alive
+
+    - pip:
         name:
           - flask
           - ping3
-    - name: Deploy systemd service
-      copy:
+
+    - copy:
         dest: /etc/systemd/system/alive.service
         content: |
           [Unit]
-          Description=Bastion monitor
+          Description=Bastion node-availability service
+          After=network.target
+
           [Service]
-          ExecStart=/usr/bin/python3 /usr/local/bin/alive.py
+          Environment=FLASK_APP=/usr/local/bin/alive.py
+          ExecStart=/usr/bin/python3 -m flask run --host=0.0.0.0 --port=7000
           Restart=always
+
           [Install]
           WantedBy=multi-user.target
       notify: Restart alive
+
   handlers:
     - name: Restart alive
       systemd:
@@ -32,25 +51,52 @@
         state: restarted
         enabled: yes
         daemon_reload: yes
-
+        
+#PROXY – HAProxy (TCP) + NGINX stream (UDP)
 - name: Configure proxy
   hosts: proxy
   gather_facts: false
+  become: yes
+ # stream module included
   tasks:
-    - name: Install haproxy
+    - name: Install HAProxy and Nginx
       apt:
-        name: haproxy
         update_cache: yes
-    - name: Deploy cfg
+        name:
+          - haproxy
+          - nginx-core         
+
+    #HAProxyTCP/5000
+    - name: Deploy HAProxy configuration (TCP)
       template:
         src: haproxy.cfg.j2
         dest: /etc/haproxy/haproxy.cfg
       notify: Restart haproxy
-    - name: Ensure running
-      systemd:
-        name: haproxy
+
+    #Nginx stream UDP/6000
+    - name: Deploy Nginx stream config via template
+      template:
+        src: nginx_stream.conf.j2
+        dest: /etc/nginx/snmp_stream.conf
+      notify: Restart nginx
+
+    - name: Ensure nginx.conf includes snmp_stream.conf at top-level
+      lineinfile:
+        path: /etc/nginx/nginx.conf
+        insertafter: 'include /etc/nginx/modules-enabled/.*'
+        line: 'include /etc/nginx/snmp_stream.conf;'
+        state: present
+      notify: Restart nginx
+
+    #make sure both services are running
+    - systemd:
+        name: "{{ item }}"
         state: started
         enabled: yes
+      loop:
+        - haproxy
+        - nginx
+
   handlers:
     - name: Restart haproxy
       systemd:
@@ -58,40 +104,54 @@
         state: restarted
         daemon_reload: yes
 
+    - name: Restart nginx
+      systemd:
+        name: nginx
+        state: restarted
+        daemon_reload: yes
+
+#SERVICE NODES – service.py + SNMPd
 - name: Configure service nodes
   hosts: nodes
   become: yes
   gather_facts: false
+
   tasks:
     - apt:
+        update_cache: yes
         name:
           - python3-pip
           - snmpd
-        update_cache: yes
+
     - pip:
         name: flask
+
     - copy:
         src: service.py
         dest: /opt/service.py
-        mode: '0755'
+        mode: "0755"
+
     - copy:
         src: snmpd.conf
         dest: /etc/snmp/snmpd.conf
+      notify: Restart snmpd
+
     - copy:
         dest: /etc/systemd/system/service.service
         content: |
           [Unit]
-          Description=service.py
+          Description=service.py demo
           After=network.target
+
           [Service]
           ExecStart=/usr/bin/python3 /opt/service.py
           Restart=always
+
           [Install]
           WantedBy=multi-user.target
-      notify:
-        - Restart service
-    - name: Enable services
-      systemd:
+      notify: Restart service
+
+    - systemd:
         name: "{{ item }}"
         state: started
         enabled: yes
@@ -99,9 +159,16 @@
       loop:
         - service
         - snmpd
+
   handlers:
     - name: Restart service
       systemd:
         name: service
+        state: restarted
+        daemon_reload: yes
+
+    - name: Restart snmpd
+      systemd:
+        name: snmpd
         state: restarted
         daemon_reload: yes
