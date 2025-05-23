@@ -3,15 +3,18 @@ Instructions to run
 A)install 
 1. chmod +x install
 2. ./install <openrc> <tag> <ssh_key>
+3. The program terminates on its own at completion.
 
 B)operate 
 1. chmod +x operate
 2. ./operate <openrc> <tag> <ssh_key>
 3. In the operate mode (while it is running ) a quick check can be made by changing number of nodes in servers.conf file
+4. Use CTRL+C to terminate the program whenever desired.
 
 C)cleanup 
 1. chmod +x cleanup
 2. ./cleanup <openrc> <tag> <ssh_key>
+3. The program terminates on its own at completion.
 
 The file common.py contains all the helpers functions to run install and operate (basically things like the inital
 connection o openstack so on and so forth) so donot delete it. you dont need to give any permisions to 
