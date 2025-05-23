@@ -1,0 +1,13 @@
+# stream configuration by Ansible
+stream {
+    upstream snmp_nodes {
+{% for host in groups['nodes'] %}
+        server {{ hostvars[host].ansible_host }}:6000;
+{% endfor %}
+    }
+
+    server {
+        listen 6000 udp;
+        proxy_pass snmp_nodes;
+    }
+}
