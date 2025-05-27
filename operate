@@ -58,6 +58,7 @@ def main(rc, tag, priv):
     cfg = f"{tag}_SSHconfig"
 
     while not stop:
+        LOG.info("— reconciliation cycle —")
         wanted = desired()
         all_srv = list(conn.compute.servers(details=False))
         nodes = [
@@ -81,15 +82,21 @@ def main(rc, tag, priv):
                     networks=[{"uuid": net.id}], key_name=f"{tag}_key",
                     security_groups=[{"name": sg.name}],
                 )
+                LOG.info("  Waiting for %s to become ACTIVE …", name)
                 wait_active(conn, srv)
+                LOG.info("  %s ACTIVE", name)
                 new_nodes.append(srv)
                 nodes.append(srv)
 
             pairs = [(s.name, first_fixed_ip(conn, s)) for s in nodes]
+            LOG.info("Re-writing SSH config with new nodes")
             build_cfg(cfg, priv, bast_ip, pairs,
                       proxy_ip=proxy_fixed, tag=tag)
+
             for srv in new_nodes:
+                LOG.info("  Waiting for SSH on %s …", srv.name)
                 wait_ssh(srv.name, "ubuntu", priv, ssh_config=cfg)
+                LOG.info("  %s SSH ready", srv.name)
 
             _run_playbook(rc, tag, priv, cfg)
 
@@ -100,6 +107,7 @@ def main(rc, tag, priv):
                 LOG.info("  Deleting %s", srv.name)
                 conn.compute.delete_server(srv.id)
 
+            LOG.info("Waiting 10 s for Nova to free resources …")
             time.sleep(10)
             remain = [
                  s for s in conn.compute.servers(details=False)
@@ -107,6 +115,7 @@ def main(rc, tag, priv):
                  and not s.name.endswith(("_proxy", "_bastion"))
             ]
             pairs = [(s.name, first_fixed_ip(conn, s)) for s in remain]
+            LOG.info("Re-writing SSH config after scale-in")
             build_cfg(cfg, priv, bast_ip, pairs,
                       proxy_ip=proxy_fixed, tag=tag)
 
@@ -122,6 +131,7 @@ def main(rc, tag, priv):
 
 def _run_playbook(rc_path, tag, priv_key, ssh_cfg):
     """Invoke site.yaml with dynamic inventory."""
+    LOG.info("Running Ansible playbook for current topology …")
     if os.path.exists("common.py"):
         mode = os.stat("common.py").st_mode
         os.chmod("common.py", mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
@@ -139,6 +149,7 @@ def _run_playbook(rc_path, tag, priv_key, ssh_cfg):
         env=env,
         check=False,
     )
+    LOG.info("Ansible run completed")
 
 
 if __name__ == "__main__":
