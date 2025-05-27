@@ -27,3 +27,7 @@ ab -n <TOTAL_REQUESTS> -c <CONCURRENCY> http://<proxy_public_ip>:5000/
 
 but make sure the apache utils are installed if not it can be installed using  this
 sudo apt install apache2-utils 
+
+To run anible playbook manually make use of the script ansible.sh as below
+chmod +x ansible.sh
+./ansible.sh <openrc> <tag> <ssh_key>
