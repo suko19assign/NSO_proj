@@ -2,9 +2,9 @@
 """
 operate – reconciliation loop for service nodes named <tag>_<N>
 """
-import argparse, logging, os, re, signal, stat, time
+import argparse, logging, os, re, signal, stat, time, subprocess
 from common import (
-    conn_from_rc, pick_image, choose_flavor, wait_active, wait_ssh
+    conn_from_rc, pick_image, choose_flavor, wait_active, wait_ssh, build_cfg
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -45,22 +45,6 @@ def bast_fip(server):
                 return a["addr"]
 
 
-def build_cfg(path, priv, bast_ip, pairs):
-    with open(path, "w") as f:
-        f.write(
-            f"Host bastion\nHostName {bast_ip}\nUser ubuntu\n"
-            f"IdentityFile {priv}\nStrictHostKeyChecking no\n"
-            f"UserKnownHostsFile /dev/null\n\n"
-        )
-        for alias, ip in pairs:
-            for h in (alias, ip):
-                f.write(
-                    f"Host {h}\nHostName {ip}\nUser ubuntu\n"
-                    f"IdentityFile {priv}\nProxyJump bastion\n"
-                    f"StrictHostKeyChecking no\nUserKnownHostsFile /dev/null\n\n"
-                )
-
-
 def main(rc, tag, priv):
     conn = conn_from_rc(rc)
     image = pick_image(conn)
@@ -68,13 +52,19 @@ def main(rc, tag, priv):
     net = conn.network.find_network(f"{tag}_net")
     sg = conn.network.find_security_group(f"{tag}_sg_nodes")
     bastion = conn.compute.find_server(f"{tag}_bastion")
+    proxy_srv = conn.compute.find_server(f"{tag}_proxy")
     bast_ip = bast_fip(bastion)
+    proxy_fixed = first_fixed_ip(conn, proxy_srv)
     cfg = f"{tag}_SSHconfig"
 
     while not stop:
         wanted = desired()
         all_srv = list(conn.compute.servers(details=False))
-        nodes = [s for s in all_srv if index(s.name, tag) is not None]
+        nodes = [
+            s for s in all_srv
+            if index(s.name, tag) is not None
+            and not s.name.endswith(("_proxy", "_bastion"))
+        ]
         diff = wanted - len(nodes)
         LOG.info("Desired %d nodes; have %d", wanted, len(nodes))
 
@@ -96,21 +86,13 @@ def main(rc, tag, priv):
                 nodes.append(srv)
 
             pairs = [(s.name, first_fixed_ip(conn, s)) for s in nodes]
-            build_cfg(cfg, priv, bast_ip, pairs)
+            build_cfg(cfg, priv, bast_ip, pairs,
+                      proxy_ip=proxy_fixed, tag=tag)
             for srv in new_nodes:
                 wait_ssh(srv.name, "ubuntu", priv, ssh_config=cfg)
 
             # ensure common.py is executable for inventory
-            if os.path.exists("common.py"):
-                m = os.stat("common.py").st_mode
-                os.chmod("common.py", m | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-
-            env = (
-                f"OPENRC={rc} TAG={tag} SSH_KEY={priv} "
-                f"ANSIBLE_HOST_KEY_CHECKING=False "
-                f"ANSIBLE_SSH_COMMON_ARGS='-F {cfg}' "
-            )
-            os.system(env + "ansible-playbook -i common.py site.yaml")
+            _run_playbook(rc, tag, priv, cfg)
 
         elif diff < 0:
             LOG.info("Scaling in by %d nodes", -diff)
@@ -120,22 +102,16 @@ def main(rc, tag, priv):
                 conn.compute.delete_server(srv.id)
 
             time.sleep(10)
-
-            remain = [s for s in conn.compute.servers(details=False) if index(s.name, tag) is not None]
+            remain = [   
+                 s for s in conn.compute.servers(details=False)
+                 if index(s.name, tag) is not None
+                 and not s.name.endswith(("_proxy", "_bastion"))
+            ]
             pairs = [(s.name, first_fixed_ip(conn, s)) for s in remain]
             build_cfg(cfg, priv, bast_ip, pairs)
 
             # ensure common.py is executable
-            if os.path.exists("common.py"):
-                m = os.stat("common.py").st_mode
-                os.chmod("common.py", m | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-
-            env = (
-                f"OPENRC={rc} TAG={tag} SSH_KEY={priv} "
-                f"ANSIBLE_HOST_KEY_CHECKING=False "
-                f"ANSIBLE_SSH_COMMON_ARGS='-F {cfg}' "
-            )
-            os.system(env + "ansible-playbook -i common.py site.yaml")
+            _run_playbook(rc, tag, priv, cfg)
 
         for _ in range(30):
             if stop:
@@ -144,6 +120,26 @@ def main(rc, tag, priv):
 
     LOG.info("Operate loop exited")
 
+
+def _run_playbook(rc_path, tag, priv_key, ssh_cfg):
+    """Invoke site.yaml with dynamic inventory."""
+    if os.path.exists("common.py"):
+        mode = os.stat("common.py").st_mode
+        os.chmod("common.py", mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+    env = os.environ.copy()
+    env.update({
+        "OPENRC": rc_path,
+        "TAG": tag,
+        "SSH_KEY": priv_key,
+        "ANSIBLE_HOST_KEY_CHECKING": "False",
+        "ANSIBLE_SSH_COMMON_ARGS": f"-F {ssh_cfg}",
+    })
+    subprocess.run(
+        ["ansible-playbook", "-i", "common.py", "site.yaml"],
+        env=env,
+        check=False,
+    )
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
