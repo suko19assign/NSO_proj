@@ -8,7 +8,9 @@
   tasks:
     - apt:
         update_cache: yes
-        name: python3-pip
+        name: 
+         - python3-pip
+         - snmp
 
     - copy:
         src: alive.py
