@@ -20,6 +20,31 @@ import time
 LOG = logging.getLogger(__name__)
 
 #helper
+def build_cfg(path, priv, bast_ip, pairs, proxy_ip=None, tag=""):
+    with open(path, "w") as f:
+        # bastion
+        f.write(
+            f"Host bastion\nHostName {bast_ip}\nUser ubuntu\n"
+            f"IdentityFile {priv}\nStrictHostKeyChecking no\n"
+            f"UserKnownHostsFile /dev/null\n\n"
+        )
+        # proxy (NEW, if supplied)
+        if proxy_ip:
+            f.write(
+                f"Host {tag}_proxy\nHostName {proxy_ip}\nUser ubuntu\n"
+                f"IdentityFile {priv}\nProxyJump bastion\n"
+                f"StrictHostKeyChecking no\nUserKnownHostsFile /dev/null\n\n"
+            )
+        # service nodes
+        for alias, ip in pairs:
+            for h in (alias, ip):
+                f.write(
+                    f"Host {h}\nHostName {ip}\nUser ubuntu\n"
+                    f"IdentityFile {priv}\nProxyJump bastion\n"
+                    f"StrictHostKeyChecking no\nUserKnownHostsFile /dev/null\n\n"
+                )
+                
+                
 def conn_from_rc(rc_path):
     """Return an OpenStackSDK Connection using variables in an openrc file."""
     env = {}
