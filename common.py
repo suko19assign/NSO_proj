@@ -158,7 +158,7 @@ def _collect_inventory(conn, tag, key_path):
 
 
 def inventory_main():
-    """Entry-point used by inventory.py or when running common.py directly."""
+    """Entry-point used when running common.py directly."""
     rc_path = os.environ.get("OPENRC")
     tag     = os.environ.get("TAG")
     if not rc_path or not tag:
