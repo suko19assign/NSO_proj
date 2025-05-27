@@ -9,7 +9,7 @@ import os
 import stat
 import subprocess
 import time
-from openstack import exceptions as os_exc
+import openstack.exceptions as os_exc            # ← added
 
 from common import (
     conn_from_rc,
@@ -69,15 +69,20 @@ def alloc_fip(conn, server, ext_net):
             if addr.get("OS-EXT-IPS:type") == "floating":
                 return addr["addr"]
 
-    fip = next(
-        (ip for ip in conn.network.ips()
-         if not ip.port_id and ip.floating_network_id == ext_net.id),
+    free_fip = next(
+        (
+            ip
+            for ip in conn.network.ips()
+            if not ip.port_id and ip.floating_network_id == ext_net.id
+        ),
         None,
-    ) or conn.network.create_ip(floating_network_id=ext_net.id)
+    )
+    if free_fip is None:
+        free_fip = conn.network.create_ip(floating_network_id=ext_net.id)
 
     port = next(iter(conn.network.ports(device_id=server.id)))
     try:
-        conn.network.update_ip(fip, port_id=port.id)
+        conn.network.update_ip(free_fip, port_id=port.id)
     except os_exc.ConflictException:
         LOG.warning(
             "Floating IP race detected; discovering already-attached FIP …"
@@ -89,7 +94,7 @@ def alloc_fip(conn, server, ext_net):
                     return a["addr"]
         raise
 
-    return fip.floating_ip_address
+    return free_fip.floating_ip_address
 
 
 def expand_keys(path):
@@ -176,9 +181,14 @@ def main(rc, tag, key_path):
         key_name=kname,
         security_groups=[{"name": sg_bast.name}],
     )
+    LOG.info("Waiting for bastion to become ACTIVE …")
     wait_active(conn, bastion)
+    LOG.info("Bastion ACTIVE")
+    LOG.info("Associating floating IP to %s", bastion.name)
     bast_ip = alloc_fip(conn, bastion, ext_net)
+    LOG.info("Waiting for SSH on bastion …")
     wait_ssh(bast_ip, "ubuntu", priv)
+    LOG.info("Bastion SSH ready")
 
     # proxy
     LOG.info("Launching proxy")
@@ -190,7 +200,9 @@ def main(rc, tag, key_path):
         key_name=kname,
         security_groups=[{"name": sg_proxy.name}],
     )
+    LOG.info("Waiting for proxy to become ACTIVE …")
     wait_active(conn, proxy)
+    LOG.info("Proxy ACTIVE")
     proxy_ip = alloc_fip(conn, proxy, ext_net)
     proxy_fixed = wait_fixed_ip(conn, proxy)
 
@@ -206,20 +218,22 @@ def main(rc, tag, key_path):
             key_name=kname,
             security_groups=[{"name": sg_nodes.name}],
         )
+        LOG.info("Waiting for %s to become ACTIVE …", node.name)
         wait_active(conn, node)
+        LOG.info("%s ACTIVE", node.name)
         service_nodes.append(node)
 
     # SSH config
     ssh_cfg = f"{tag}_SSHconfig"
     LOG.info("Writing SSH config %s", ssh_cfg)
-    pairs = [(node.name, wait_fixed_ip(conn, node)) for node in service_nodes]
-    build_cfg(ssh_cfg, priv, bast_ip, pairs,
-              proxy_ip=proxy_fixed, tag=tag)
+    pairs = [(srv.name, wait_fixed_ip(conn, srv)) for srv in service_nodes]
+    build_cfg(ssh_cfg, priv, bast_ip, pairs, proxy_ip=proxy_fixed, tag=tag)
 
     # confirm SSH readiness
     LOG.info("Waiting for SSH on all service nodes")
     for node in service_nodes:
         wait_ssh(node.name, "ubuntu", priv, ssh_config=ssh_cfg)
+        LOG.info("%s SSH ready", node.name)
 
     # ----- ensure common.py is executable for Ansible inventory -----
     if os.path.exists("common.py"):
@@ -242,7 +256,8 @@ def main(rc, tag, key_path):
         check=True,
     )
 
-    LOG.info("Deployment finished – bastion=%s  proxy=%s", bast_ip, proxy_ip)
+    LOG.info("Deployment finished – bastion=%s  proxy=%s",
+             bast_ip, proxy_ip)
 
 
 if __name__ == "__main__":
