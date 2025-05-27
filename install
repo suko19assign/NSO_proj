@@ -9,6 +9,7 @@ import os
 import stat
 import subprocess
 import time
+from openstack import exceptions as os_exc
 
 from common import (
     conn_from_rc,
@@ -16,6 +17,7 @@ from common import (
     wait_active,
     choose_flavor,
     wait_ssh,
+    build_cfg,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -61,16 +63,32 @@ def ensure_sg(conn, name, rules):
 
 
 def alloc_fip(conn, server, ext_net):
-    LOG.info("Associating floating IP to %s", server.name)
-    for ip in conn.network.ips():
-        if not ip.port_id and ip.floating_network_id == ext_net.id:
-            fip = ip
-            break
-    else:
-        fip = conn.network.create_ip(floating_network_id=ext_net.id)
 
-    port = next(iter(conn.network.ports(device_id=server.id)), None)
-    conn.network.update_ip(fip, port_id=port.id)
+    for nets in (server.addresses or {}).values():
+        for addr in nets:
+            if addr.get("OS-EXT-IPS:type") == "floating":
+                return addr["addr"]
+
+    fip = next(
+        (ip for ip in conn.network.ips()
+         if not ip.port_id and ip.floating_network_id == ext_net.id),
+        None,
+    ) or conn.network.create_ip(floating_network_id=ext_net.id)
+
+    port = next(iter(conn.network.ports(device_id=server.id)))
+    try:
+        conn.network.update_ip(fip, port_id=port.id)
+    except os_exc.ConflictException:
+        LOG.warning(
+            "Floating IP race detected; discovering already-attached FIP …"
+        )
+        server = conn.compute.get_server(server.id)
+        for nets in server.addresses.values():
+            for a in nets:
+                if a.get("OS-EXT-IPS:type") == "floating":
+                    return a["addr"]
+        raise
+
     return fip.floating_ip_address
 
 
@@ -174,6 +192,7 @@ def main(rc, tag, key_path):
     )
     wait_active(conn, proxy)
     proxy_ip = alloc_fip(conn, proxy, ext_net)
+    proxy_fixed = wait_fixed_ip(conn, proxy)
 
     # service nodes
     service_nodes = []
@@ -193,27 +212,9 @@ def main(rc, tag, key_path):
     # SSH config
     ssh_cfg = f"{tag}_SSHconfig"
     LOG.info("Writing SSH config %s", ssh_cfg)
-    with open(ssh_cfg, "w") as cfg:
-        cfg.write(
-            f"Host bastion\n"
-            f"  HostName {bast_ip}\n"
-            f"  User ubuntu\n"
-            f"  IdentityFile {priv}\n"
-            f"  StrictHostKeyChecking no\n"
-            f"  UserKnownHostsFile /dev/null\n\n"
-        )
-        for node in service_nodes:
-            ip = wait_fixed_ip(conn, node)
-            for alias in (node.name, ip):
-                cfg.write(
-                    f"Host {alias}\n"
-                    f"  HostName {ip}\n"
-                    f"  User ubuntu\n"
-                    f"  IdentityFile {priv}\n"
-                    f"  ProxyJump bastion\n"
-                    f"  StrictHostKeyChecking no\n"
-                    f"  UserKnownHostsFile /dev/null\n\n"
-                )
+    pairs = [(node.name, wait_fixed_ip(conn, node)) for node in service_nodes]
+    build_cfg(ssh_cfg, priv, bast_ip, pairs,
+              proxy_ip=proxy_fixed, tag=tag)
 
     # confirm SSH readiness
     LOG.info("Waiting for SSH on all service nodes")
@@ -251,4 +252,3 @@ if __name__ == "__main__":
     parser.add_argument("ssh_key")
     args = parser.parse_args()
     main(args.openrc, args.tag, args.ssh_key)
-
