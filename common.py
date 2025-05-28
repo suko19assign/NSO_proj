@@ -103,7 +103,9 @@ def wait_ssh(host, user="ubuntu", key_path=None, timeout=900, ssh_config=None):
         ]
         if ssh_config:
             cmd += ["-F", ssh_config]
-        cmd += ["-i", key_path, f"{user}@{host}", "true"]
+        if key_path and os.path.exists(key_path): 
+            cmd += ["-i", key_path]
+        cmd += [f"{user}@{host}", "true"]
 
         if subprocess.run(cmd,
                           stdout=subprocess.DEVNULL,
