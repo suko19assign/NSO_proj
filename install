@@ -9,7 +9,7 @@ import os
 import stat
 import subprocess
 import time
-import openstack.exceptions as os_exc            # ← added
+import openstack.exceptions as os_exc
 
 from common import (
     conn_from_rc,
@@ -84,9 +84,7 @@ def alloc_fip(conn, server, ext_net):
     try:
         conn.network.update_ip(free_fip, port_id=port.id)
     except os_exc.ConflictException:
-        LOG.warning(
-            "Floating IP race detected; discovering already-attached FIP …"
-        )
+        LOG.warning("Floating IP race detected; discovering already-attached FIP …")
         server = conn.compute.get_server(server.id)
         for nets in server.addresses.values():
             for a in nets:
@@ -114,12 +112,28 @@ def wait_fixed_ip(conn, server, timeout=300):
     raise TimeoutError(f"{server.name} has no fixed IP after {timeout}s")
 
 
-#main 
+#main
 def main(rc, tag, key_path):
     priv, pub = expand_keys(key_path)
-    if not os.path.exists(pub):
-        LOG.error("Public key %s not found", pub)
-        return
+    priv_exists = os.path.exists(priv)
+    pub_exists  = os.path.exists(pub)
+
+    if not pub_exists and priv_exists:
+        try:
+            pub_data = subprocess.check_output(
+                ["ssh-keygen", "-y", "-f", priv],
+                text=True,
+            ).strip()
+            pub_exists = True
+        except Exception:
+            pub_data = ""
+    elif pub_exists:
+        pub_data = open(pub).read().strip()
+    else:
+        pub_data = ""
+
+    key_for_ssh = priv if priv_exists else None
+    key_for_cfg = priv if priv_exists else os.path.expanduser("~/.ssh/id_rsa")
 
     LOG.info("Connecting to OpenStack")
     conn = conn_from_rc(rc)
@@ -128,9 +142,9 @@ def main(rc, tag, key_path):
 
     # key-pair
     kname = f"{tag}_key"
-    if not conn.compute.find_keypair(kname):
+    if not conn.compute.find_keypair(kname) and pub_data:
         LOG.info("Uploading key-pair %s", kname)
-        conn.compute.create_keypair(name=kname, public_key=open(pub).read())
+        conn.compute.create_keypair(name=kname, public_key=pub_data)
 
     # network, subnet, router
     net = conn.network.find_network(f"{tag}_net")
@@ -154,16 +168,15 @@ def main(rc, tag, key_path):
 
     # security groups
     sg_nodes = ensure_sg(
-        conn,
-        f"{tag}_sg_nodes",
+        conn, f"{tag}_sg_nodes",
         [("tcp", 22), ("tcp", 5000), ("udp", 6000), ("icmp", None)],
     )
     sg_bast = ensure_sg(
-        conn, f"{tag}_sg_bastion", [("tcp", 22), ("tcp", 7000), ("icmp", None)]
+        conn, f"{tag}_sg_bastion",
+        [("tcp", 22), ("tcp", 7000), ("icmp", None)],
     )
     sg_proxy = ensure_sg(
-        conn,
-        f"{tag}_sg_proxy",
+        conn, f"{tag}_sg_proxy",
         [("tcp", 22), ("tcp", 5000), ("udp", 6000), ("icmp", None)],
     )
 
@@ -187,7 +200,7 @@ def main(rc, tag, key_path):
     LOG.info("Associating floating IP to %s", bastion.name)
     bast_ip = alloc_fip(conn, bastion, ext_net)
     LOG.info("Waiting for SSH on bastion …")
-    wait_ssh(bast_ip, "ubuntu", priv)
+    wait_ssh(bast_ip, "ubuntu", key_for_ssh)
     LOG.info("Bastion SSH ready")
 
     # proxy
@@ -223,16 +236,16 @@ def main(rc, tag, key_path):
         LOG.info("%s ACTIVE", node.name)
         service_nodes.append(node)
 
-    # SSH config
+   # SSH config
     ssh_cfg = f"{tag}_SSHconfig"
     LOG.info("Writing SSH config %s", ssh_cfg)
     pairs = [(srv.name, wait_fixed_ip(conn, srv)) for srv in service_nodes]
-    build_cfg(ssh_cfg, priv, bast_ip, pairs, proxy_ip=proxy_fixed, tag=tag)
+    build_cfg(ssh_cfg, key_for_cfg, bast_ip, pairs, proxy_ip=proxy_fixed, tag=tag)
 
     # confirm SSH readiness
     LOG.info("Waiting for SSH on all service nodes")
     for node in service_nodes:
-        wait_ssh(node.name, "ubuntu", priv, ssh_config=ssh_cfg)
+        wait_ssh(node.name, "ubuntu", key_for_ssh, ssh_config=ssh_cfg)
         LOG.info("%s SSH ready", node.name)
 
     # ----- ensure common.py is executable for Ansible inventory -----
@@ -245,7 +258,7 @@ def main(rc, tag, key_path):
     env.update({
         "OPENRC": rc,
         "TAG": tag,
-        "SSH_KEY": priv,
+        "SSH_KEY": priv if priv_exists else "",
         "ANSIBLE_HOST_KEY_CHECKING": "False",
         "ANSIBLE_SSH_COMMON_ARGS": f"-F {ssh_cfg}",
     })
@@ -256,8 +269,7 @@ def main(rc, tag, key_path):
         check=True,
     )
 
-    LOG.info("Deployment finished – bastion=%s  proxy=%s",
-             bast_ip, proxy_ip)
+    LOG.info("Deployment finished – bastion=%s  proxy=%s", bast_ip, proxy_ip)
 
 
 if __name__ == "__main__":
